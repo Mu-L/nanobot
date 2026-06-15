@@ -97,8 +97,6 @@ class ToolLoader:
         return plugins
 
     def load(self, ctx: Any, registry: ToolRegistry, *, scope: str = "core") -> list[str]:
-        from nanobot.agent.tools.config import tool_config
-
         registered: list[str] = []
         builtin_names: set[str] = set()
         sources = [(self.discover(), False), (self._discover_plugins().values(), True)]
@@ -108,7 +106,6 @@ class ToolLoader:
                 try:
                     if scope not in getattr(tool_cls, "_scopes", {"core"}):
                         continue
-                    tool_config(ctx.config, tool_cls)
                     if not tool_cls.enabled(ctx):
                         continue
                     tool = tool_cls.create(ctx)

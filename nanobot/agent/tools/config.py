@@ -58,17 +58,6 @@ def _materialize_config(config: BaseModel, key: str, config_cls: type[BaseModel]
     return parsed
 
 
-def tool_config(config: Any, tool_cls: type[Any]) -> Any:
-    """Return the parsed config section for one tool class."""
-    key = getattr(tool_cls, "config_key", "")
-    config_cls = tool_cls.config_cls()
-    if not key or config_cls is None:
-        return None
-    if not isinstance(config, BaseModel):
-        return getattr(config, key)
-    return _materialize_config(config, key, config_cls)
-
-
 def tool_config_by_key(config: Any, key: str) -> Any:
     """Return the parsed config section for a tool config key."""
     if not isinstance(config, BaseModel):

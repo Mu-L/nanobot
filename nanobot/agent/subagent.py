@@ -115,12 +115,10 @@ class SubagentManager:
 
     def _subagent_tools_config(self) -> ToolsConfig:
         """Build a ToolsConfig scoped for subagent use."""
-        from nanobot.agent.tools.config import tool_config_by_key
-
         return ToolsConfig(
-            exec=tool_config_by_key(self.tools_config, "exec"),
-            web=tool_config_by_key(self.tools_config, "web"),
-            file=tool_config_by_key(self.tools_config, "file"),
+            exec=self.tools_config.exec,
+            web=self.tools_config.web,
+            file=self.tools_config.file,
             restrict_to_workspace=self.restrict_to_workspace,
         )
 
