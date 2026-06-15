@@ -217,6 +217,7 @@ class AgentLoop:
         runtime_events: RuntimeEventBus | None = None,
         runtime_model_publisher: Callable[[str, str | None], None] | None = None,
     ):
+        from nanobot.agent.tools.config import tool_config_by_key
         from nanobot.config.schema import ToolsConfig
 
         _tc = tools_config or ToolsConfig()
@@ -254,8 +255,8 @@ class AgentLoop:
             else defaults.tool_hint_max_length
         )
         self.tools_config = _tc
-        self.web_config = _tc.web
-        self.exec_config = _tc.exec
+        self.web_config = tool_config_by_key(_tc, "web")
+        self.exec_config = tool_config_by_key(_tc, "exec")
         self._image_generation_provider_configs = dict(image_generation_provider_configs or {})
         if (
             image_generation_provider_config is not None
@@ -439,6 +440,7 @@ class AgentLoop:
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools via plugin loader."""
+        from nanobot.agent.tools.config import tool_config
         from nanobot.agent.tools.context import ToolContext
         from nanobot.agent.tools.loader import ToolLoader
 
@@ -459,9 +461,10 @@ class AgentLoop:
         registered = loader.load(ctx, self.tools)
 
         # MyTool needs runtime state reference — manual registration
-        if self.tools_config.my.enable:
+        my_config = tool_config(self.tools_config, MyTool)
+        if my_config.enable:
             self.tools.register(
-                MyTool(runtime_state=self, modify_allowed=self.tools_config.my.allow_set)
+                MyTool(runtime_state=self, modify_allowed=my_config.allow_set)
             )
             registered.append("my")
 

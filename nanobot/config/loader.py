@@ -50,6 +50,12 @@ def load_config(config_path: Path | None = None) -> Config:
         except (json.JSONDecodeError, ValueError, pydantic.ValidationError) as e:
             raise ValueError(f"Failed to load config from {path}: {e}") from e
 
+    from nanobot.agent.tools.config import materialize_tool_configs
+
+    try:
+        materialize_tool_configs(config.tools)
+    except (ValueError, pydantic.ValidationError) as e:
+        raise ValueError(f"Failed to load config from {path}: {e}") from e
     _apply_ssrf_whitelist(config)
     return config
 
@@ -72,6 +78,9 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
     path = config_path or get_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    from nanobot.agent.tools.config import materialize_tool_configs
+
+    materialize_tool_configs(config.tools)
     data = config.model_dump(mode="json", by_alias=True)
 
     with open(path, "w", encoding="utf-8") as f:
