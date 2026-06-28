@@ -6,15 +6,17 @@ import asyncio
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
+import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
-from pydantic import Field
+from pydantic import AliasChoices, Field
 
 from nanobot.agent.tools.base import Tool, tool_parameters
 from nanobot.agent.tools.context import current_request_session_key
@@ -62,6 +64,13 @@ class ExecToolConfig(Base):
     """Shell exec tool configuration."""
     enable: bool = True
     timeout: int = Field(default=60, ge=0)  # Hard timeout (s); 0 = no limit. Not capped by the per-call max.
+    allow_local_service_access: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "allowLocalServiceAccess",
+            "allow_local_service_access",
+        ),
+    )  # allow shell commands to reach literal localhost/loopback services
     path_prepend: str = ""
     path_append: str = ""
     sandbox: str = ""
@@ -133,6 +142,16 @@ class _PreparedCommand:
             maximum=MAX_OUTPUT_CHARS,
             nullable=True,
         ),
+        detach=BooleanSchema(
+            description=(
+                "Run the command as a detached background process that can "
+                "survive after the agent finishes. Use for local servers, "
+                "dev servers, mock APIs, or other services that must remain "
+                "available for later commands or external verification."
+            ),
+            default=False,
+            nullable=True,
+        ),
     )
 )
 class ExecTool(Tool):
@@ -156,6 +175,7 @@ class ExecTool(Tool):
             working_dir=ctx.workspace,
             timeout=cfg.timeout,
             restrict_to_workspace=ctx.config.restrict_to_workspace,
+            allow_local_service_access=cfg.allow_local_service_access,
             webui_allow_local_service_access=ctx.config.webui_allow_local_service_access,
             sandbox=cfg.sandbox,
             path_prepend=cfg.path_prepend,
@@ -172,6 +192,7 @@ class ExecTool(Tool):
         deny_patterns: list[str] | None = None,
         allow_patterns: list[str] | None = None,
         restrict_to_workspace: bool = False,
+        allow_local_service_access: bool = False,
         webui_allow_local_service_access: bool = True,
         allow_local_preview_access: bool | None = None,
         sandbox: str = "",
@@ -204,6 +225,7 @@ class ExecTool(Tool):
         ]
         self.allow_patterns = allow_patterns or []
         self.restrict_to_workspace = restrict_to_workspace
+        self.allow_local_service_access = allow_local_service_access
         if allow_local_preview_access is not None:
             webui_allow_local_service_access = allow_local_preview_access
         self.webui_allow_local_service_access = webui_allow_local_service_access
@@ -243,8 +265,11 @@ class ExecTool(Tool):
             "Use -y or --yes flags to avoid interactive prompts. "
             "For long-running or interactive commands, pass yield_time_ms; "
             "if the command keeps running, exec returns a session_id that can "
-            "be polled or written to with write_stdin. Output is truncated at "
-            "10 000 chars; timeout defaults to 60s."
+            "be polled or written to with write_stdin. For services that "
+            "must remain available after you finish, pass detach=true instead "
+            "of yield_time_ms; detached output is written to a log file and "
+            "the tool returns a pid. Output is truncated at 10 000 chars; "
+            "timeout defaults to 60s."
         )
 
     @property
@@ -258,6 +283,7 @@ class ExecTool(Tool):
         login: bool | None = None, yield_time_ms: int | None = None,
         max_output_chars: int | None = None,
         max_output_tokens: int | None = None,
+        detach: bool | None = False,
         **kwargs: Any,
     ) -> str:
         command = command or cmd
@@ -270,6 +296,9 @@ class ExecTool(Tool):
         prepared = self._prepare_command(command, working_dir, timeout, shell, login)
         if isinstance(prepared, str):
             return prepared
+
+        if detach:
+            return await self._execute_detached(prepared)
 
         if yield_time_ms is not None:
             return await self._execute_session(prepared, yield_time_ms, max_output_chars)
@@ -386,6 +415,61 @@ class ExecTool(Tool):
             return result
         except Exception as exc:
             return f"Error executing command: {exc}"
+
+    async def _execute_detached(self, prepared: _PreparedCommand) -> str:
+        log_dir = Path(prepared.cwd) / ".nanobot" / "exec-logs"
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / f"detached-{uuid.uuid4().hex[:12]}.log"
+        except Exception as exc:
+            return f"Error preparing detached command log directory: {exc}"
+
+        log_handle = None
+        try:
+            log_handle = open(log_path, "ab", buffering=0)
+            process = await self._spawn(
+                prepared.command,
+                prepared.cwd,
+                prepared.env,
+                prepared.shell_program,
+                prepared.login,
+                stdout=log_handle,
+                stderr=log_handle,
+                start_new_session=not _IS_WINDOWS,
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+                    if _IS_WINDOWS
+                    else 0
+                ),
+            )
+        except Exception as exc:
+            return f"Error starting detached command: {exc}"
+        finally:
+            if log_handle is not None:
+                with suppress(Exception):
+                    log_handle.close()
+
+        try:
+            exit_code = await asyncio.wait_for(process.wait(), timeout=0.2)
+        except asyncio.TimeoutError:
+            return (
+                "Detached process started.\n"
+                f"pid: {process.pid}\n"
+                f"cwd: {prepared.cwd}\n"
+                f"log: {log_path}\n"
+                "Poll the log or run a health check to verify the service is ready."
+            )
+
+        log_text = ""
+        with suppress(Exception):
+            log_text = log_path.read_text(encoding="utf-8", errors="replace")
+        if len(log_text) > 4000:
+            log_text = log_text[-4000:]
+        return (
+            f"Detached process exited immediately with code {exit_code}.\n"
+            f"log: {log_path}\n"
+            f"{log_text}"
+        )
 
     def _resolve_timeout(self, timeout: int | None) -> int | None:
         """Resolve the effective hard timeout in seconds (None = no limit).
@@ -508,6 +592,10 @@ class ExecTool(Tool):
         login: bool = False,
         *,
         stdin: int = asyncio.subprocess.DEVNULL,
+        stdout: Any = asyncio.subprocess.PIPE,
+        stderr: Any = asyncio.subprocess.PIPE,
+        start_new_session: bool = False,
+        creationflags: int = 0,
     ) -> asyncio.subprocess.Process:
         """Launch *command* in a platform-appropriate shell."""
         if _IS_WINDOWS:
@@ -515,18 +603,20 @@ class ExecTool(Tool):
                 return await asyncio.create_subprocess_exec(
                     "powershell", "-NoProfile", "-Command", command,
                     stdin=stdin,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                    stdout=stdout,
+                    stderr=stderr,
                     cwd=cwd,
                     env=env,
+                    creationflags=creationflags,
                 )
             return await asyncio.create_subprocess_shell(
                 command,
                 stdin=stdin,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stdout=stdout,
+                stderr=stderr,
                 cwd=cwd,
                 env=env,
+                creationflags=creationflags,
             )
         shell_program = shell_program or shutil.which("bash") or "/bin/bash"
         args = [shell_program]
@@ -537,10 +627,11 @@ class ExecTool(Tool):
         return await asyncio.create_subprocess_exec(
             *args,
             stdin=stdin,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=stdout,
+            stderr=stderr,
             cwd=cwd,
             env=env,
+            start_new_session=start_new_session,
         )
 
     @staticmethod
@@ -658,11 +749,12 @@ class ExecTool(Tool):
                 return "Error: Command blocked by allowlist filter (not in allowlist)"
 
         from nanobot.security.network import contains_internal_url
+        allow_loopback = self.allow_local_service_access or current_scope_allows_loopback(
+            enabled=self.webui_allow_local_service_access,
+        )
         if contains_internal_url(
             cmd,
-            allow_loopback=current_scope_allows_loopback(
-                enabled=self.webui_allow_local_service_access,
-            ),
+            allow_loopback=allow_loopback,
         ):
             # The runner turns this marker into a non-retryable security hint.
             return "Error: Command blocked by safety guard (internal/private URL detected)"

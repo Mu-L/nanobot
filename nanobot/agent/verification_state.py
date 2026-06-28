@@ -43,6 +43,19 @@ _TEST_COMMAND_RE = re.compile(
     r"\bmake\s+(?:[^;&|]*\s+)?test\b"
     r")"
 )
+_ARTIFACT_CHECK_COMMAND_RE = re.compile(
+    r"(?ix)"
+    r"("
+    r"\bcmp\b|"
+    r"\bdiff\b|"
+    r"\bsha(?:1|224|256|384|512)?sum\b|"
+    r"\bmd5sum\b|"
+    r"\bgcc\b.*(?:&&|;).*\./|"
+    r"\bclang\b.*(?:&&|;).*\./|"
+    r"\bpython3?\b.*<<['\"]?PY\b.*\bassert\b"
+    r")"
+)
+_COMPARISON_COMMAND_RE = re.compile(r"(?i)\b(?:cmp|diff)\b")
 _FAILURE_RE = re.compile(
     r"(?im)"
     r"("
@@ -64,6 +77,20 @@ _SUCCESS_RE = re.compile(
     r"\bOK\b|"
     r"\bTEST PASSED\b|"
     r"\bExit code:\s*0\b"
+    r")"
+)
+_ARTIFACT_SUCCESS_RE = re.compile(
+    r"(?im)"
+    r"("
+    r"\b(?:cmp|diff|test|verify)_exit:\s*0\b|"
+    r"^\s*(?:cmp|diff|match|same|image|ppm|stdout|stderr|out|err)[\w.-]*:\s*0\s*$"
+    r")"
+)
+_ARTIFACT_FAILURE_RE = re.compile(
+    r"(?im)"
+    r"("
+    r"\b(?:cmp|diff|test|verify)_exit:\s*[1-9]\d*\b|"
+    r"^\s*(?:cmp|diff|match|same|image|ppm|stdout|stderr|out|err)[\w.-]*:\s*[1-9]\d*\s*$"
     r")"
 )
 _FAILED_TEST_RE = re.compile(r"(?m)^FAILED\s+([^\s]+)")
@@ -98,13 +125,28 @@ def analyze_verification_result(
 
     command = " ".join((command or "").split())
     looks_like_test_command = bool(_TEST_COMMAND_RE.search(command))
+    looks_like_artifact_check = bool(_ARTIFACT_CHECK_COMMAND_RE.search(command))
+    looks_like_comparison_command = bool(_COMPARISON_COMMAND_RE.search(command))
+    looks_like_verification = looks_like_test_command or looks_like_artifact_check
     failure_seen = bool(_FAILURE_RE.search(output))
     success_seen = bool(_SUCCESS_RE.search(output))
+    artifact_success_seen = bool(_ARTIFACT_SUCCESS_RE.search(output)) and (
+        looks_like_comparison_command or bool(re.search(r"\b(?:test|verify)_exit:\s*0\b", output, flags=re.I))
+    )
+    artifact_failure_seen = bool(_ARTIFACT_FAILURE_RE.search(output)) and (
+        looks_like_comparison_command or bool(re.search(r"\b(?:test|verify)_exit:\s*[1-9]\d*\b", output, flags=re.I))
+    )
 
     if not looks_like_test_command and not failure_seen:
-        return None
+        if not (looks_like_artifact_check and artifact_success_seen and exit_code == 0):
+            return None
 
-    if (timed_out and looks_like_test_command) or (exit_code not in (None, 0) and (looks_like_test_command or failure_seen)) or failure_seen:
+    if (
+        (timed_out and looks_like_verification)
+        or (exit_code not in (None, 0) and (looks_like_verification or failure_seen))
+        or failure_seen
+        or artifact_failure_seen
+    ):
         return VerificationAnalysis(
             status="failed",
             command=command,
@@ -116,6 +158,13 @@ def analyze_verification_result(
         )
 
     if looks_like_test_command and exit_code == 0 and success_seen:
+        return VerificationAnalysis(
+            status="passed",
+            command=command,
+            exit_code=exit_code,
+        )
+
+    if looks_like_artifact_check and exit_code == 0 and artifact_success_seen:
         return VerificationAnalysis(
             status="passed",
             command=command,

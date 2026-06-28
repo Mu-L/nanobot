@@ -104,6 +104,42 @@ def test_exec_one_shot_accepts_max_output_tokens_alias(tmp_path):
     assert "Exit code: 0" in result
 
 
+def test_exec_detach_starts_background_process(tmp_path):
+    async def run() -> str:
+        tool = ExecTool(working_dir=str(tmp_path), timeout=5)
+        ready_path = tmp_path / "ready.txt"
+        command = _python_command(
+            "import pathlib, time; "
+            "pathlib.Path('ready.txt').write_text('ok'); "
+            "time.sleep(0.6)"
+        )
+        result = await tool.execute(command=command, detach=True)
+        for _ in range(20):
+            if ready_path.exists():
+                break
+            await asyncio.sleep(0.05)
+        return result
+
+    result = asyncio.run(run())
+
+    assert "Detached process started." in result
+    assert "pid:" in result
+    assert "log:" in result
+    assert (tmp_path / "ready.txt").read_text() == "ok"
+
+
+def test_exec_detach_reports_immediate_exit(tmp_path):
+    async def run() -> str:
+        tool = ExecTool(working_dir=str(tmp_path), timeout=5)
+        command = _python_command("print('boom'); raise SystemExit(7)")
+        return await tool.execute(command=command, detach=True)
+
+    result = asyncio.run(run())
+
+    assert "Detached process exited immediately with code 7" in result
+    assert "boom" in result
+
+
 def test_exec_long_output_summary_includes_failure_signals(tmp_path):
     async def run() -> str:
         tool = ExecTool(working_dir=str(tmp_path), timeout=5)
