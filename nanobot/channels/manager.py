@@ -25,6 +25,7 @@ from nanobot.bus.outbound_events import (
 )
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
+from nanobot.channels.contracts import channel_instance_specs, channel_runtime_name
 from nanobot.channels.registry import DEFAULT_ENABLED_CHANNELS
 from nanobot.config.schema import Config
 from nanobot.utils.restart import consume_restart_notice_from_env, format_restart_completed_message
@@ -220,7 +221,7 @@ class ChannelManager:
             if section is None:
                 continue
             try:
-                for spec in cls.instance_specs(section):
+                for spec in channel_instance_specs(cls, section):
                     self.channels[spec.runtime_name] = self._build_channel(
                         name,
                         cls,
@@ -362,7 +363,7 @@ class ChannelManager:
 
         if action == "disable":
             runtime_names = (
-                [cls.runtime_name(instance_id)]
+                [channel_runtime_name(cls, instance_id)]
                 if instance_id
                 else [
                     runtime_name
@@ -384,7 +385,7 @@ class ChannelManager:
         if action != "enable":
             return {"handled": True, "ok": False, "requires_restart": True}
 
-        specs = cls.instance_specs(section) if section is not None else []
+        specs = channel_instance_specs(cls, section) if section is not None else []
         if instance_id:
             specs = [spec for spec in specs if spec.instance_id == instance_id]
         if not specs:
